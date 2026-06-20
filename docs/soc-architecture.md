@@ -224,7 +224,7 @@ cargo run -p riscv-core
 | --- | --- | --- |
 | Rust 单元测试 | `riscv-core/src/lib.rs` | 用 `rv32i_step` 纯函数路径与软件参考模型对拍，覆盖 ALU、立即数、访存、分支、跳转和 trap。 |
 | RHDL 编译检查 | `riscv-core/src/lib.rs` | 检查 `Rv32iStep` 能生成 HDL，并包含预期子模块。 |
-| Verilator 端到端测试 | `riscv-core/tests/gpio_verilator.rs` | 生成 SoC Verilog，编译 `verilator/gpio/gpio.c` 固件，仿真 GPIO MMIO 写序列。 |
+| Verilator 端到端测试 | `riscv-core/tests/gpio_verilator.rs` | 生成 SoC Verilog，编译 `verilator/*/*.c` 固件，仿真 GPIO MMIO 写序列。 |
 
 GPIO Verilator 固件向 `0x1000_0000` 依次写入：
 
@@ -236,6 +236,20 @@ GPIO Verilator 固件向 `0x1000_0000` 依次写入：
 ```
 
 仿真器检查 `gpio_pins` 是否按这个序列变化。
+
+另有 `verilator/control_flow` 示例，固件包含 `for` 循环、`while` 循环、`if/else` 分支以及加减法计算。它向 GPIO 写入：
+
+```text
+0x00000008
+0x0000000a
+0x00000013
+0x0000001d
+0x00000022
+0x0000001e
+0x0000001c
+0x0000001b
+0x8000001c
+```
 
 ## 当前边界和后续演进点
 

@@ -30,9 +30,8 @@ fn command_exists(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-#[test]
-fn gpio_program_passes_under_verilator() {
-    let out_dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("gpio_verilator");
+fn run_verilator_example(name: &str) {
+    let out_dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}_verilator"));
     std::fs::create_dir_all(&out_dir).unwrap();
 
     let verilog = out_dir.join("rv32i_soc.v");
@@ -40,10 +39,10 @@ fn gpio_program_passes_under_verilator() {
     let hdl = descriptor.hdl().unwrap();
     std::fs::write(&verilog, hdl.modules.to_string()).unwrap();
 
-    let firmware_elf = out_dir.join("gpio.elf");
-    let firmware_bin = out_dir.join("gpio.bin");
-    let linker = manifest_path("verilator/gpio/linker.ld");
-    let firmware_c = manifest_path("verilator/gpio/gpio.c");
+    let firmware_elf = out_dir.join(format!("{name}.elf"));
+    let firmware_bin = out_dir.join(format!("{name}.bin"));
+    let linker = manifest_path(&format!("verilator/{name}/linker.ld"));
+    let firmware_c = manifest_path(&format!("verilator/{name}/{name}.c"));
 
     let gcc = if command_exists("riscv64-linux-gnu-gcc") {
         "riscv64-linux-gnu-gcc"
@@ -63,6 +62,7 @@ fn gpio_program_passes_under_verilator() {
         .arg("-fno-builtin")
         .arg("-fno-pic")
         .arg("-fno-pie")
+        .arg("-fno-unroll-loops")
         .arg("-O2")
         .arg("-nostdlib")
         .arg("-Wl,--no-relax")
@@ -86,7 +86,7 @@ fn gpio_program_passes_under_verilator() {
         .arg(&firmware_elf)
         .arg(&firmware_bin));
 
-    let sim_main = manifest_path("verilator/gpio/sim_main.cpp");
+    let sim_main = manifest_path(&format!("verilator/{name}/sim_main.cpp"));
     let obj_dir = out_dir.join("obj_dir");
     run(Command::new("verilator")
         .arg("--cc")
@@ -105,4 +105,14 @@ fn gpio_program_passes_under_verilator() {
         .arg("--Wno-fatal"));
 
     run(Command::new(obj_dir.join("Vrv32i_soc")).arg(&firmware_bin));
+}
+
+#[test]
+fn gpio_program_passes_under_verilator() {
+    run_verilator_example("gpio");
+}
+
+#[test]
+fn control_flow_program_passes_under_verilator() {
+    run_verilator_example("control_flow");
 }
