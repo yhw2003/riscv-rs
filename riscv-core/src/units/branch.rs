@@ -1,7 +1,5 @@
 use rhdl::prelude::*;
 
-use crate::branch_taken;
-
 use super::ExecResult;
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Digital)]
@@ -12,6 +10,25 @@ pub struct BranchInput {
     pub rs1: b32,
     pub rs2: b32,
     pub imm_b: b32,
+}
+
+#[kernel]
+pub fn branch_taken(funct3: b3, rs1: b32, rs2: b32) -> (bool, bool) {
+    if funct3 == b3(0b000) {
+        (rs1 == rs2, false)
+    } else if funct3 == b3(0b001) {
+        (rs1 != rs2, false)
+    } else if funct3 == b3(0b100) {
+        (rs1.as_signed() < rs2.as_signed(), false)
+    } else if funct3 == b3(0b101) {
+        (rs1.as_signed() >= rs2.as_signed(), false)
+    } else if funct3 == b3(0b110) {
+        (rs1 < rs2, false)
+    } else if funct3 == b3(0b111) {
+        (rs1 >= rs2, false)
+    } else {
+        (false, true)
+    }
 }
 
 #[kernel]

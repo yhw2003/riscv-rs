@@ -1,8 +1,16 @@
 use rhdl::prelude::*;
 
-use crate::{StoreKind, is_store_misaligned, store_req};
+use crate::MemReq;
 
 use super::ExecResult;
+
+#[derive(Copy, Clone, Debug, Default, PartialEq, Digital)]
+pub enum StoreKind {
+    #[default]
+    Byte,
+    Half,
+    Word,
+}
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Digital)]
 pub struct StoreInput {
@@ -11,6 +19,76 @@ pub struct StoreInput {
     pub rs1: b32,
     pub rs2: b32,
     pub imm_s: b32,
+}
+
+#[kernel]
+pub fn store_req(kind: StoreKind, addr: b32, rs2: b32) -> MemReq {
+    let byte_lane: b2 = addr.resize();
+    let half_lane: b1 = (addr >> 1).resize();
+    let aligned_addr = addr & b32(0xffff_fffc);
+    let byte = rs2.resize::<8>().resize::<32>();
+    let half = rs2.resize::<16>().resize::<32>();
+    match kind {
+        StoreKind::Byte => {
+            let wdata = if byte_lane == b2(0) {
+                byte
+            } else if byte_lane == b2(1) {
+                byte << 8
+            } else if byte_lane == b2(2) {
+                byte << 16
+            } else {
+                byte << 24
+            };
+            let wstrb = if byte_lane == b2(0) {
+                b4(0b0001)
+            } else if byte_lane == b2(1) {
+                b4(0b0010)
+            } else if byte_lane == b2(2) {
+                b4(0b0100)
+            } else {
+                b4(0b1000)
+            };
+            MemReq {
+                valid: true,
+                is_write: true,
+                addr: aligned_addr,
+                wdata,
+                wstrb,
+            }
+        }
+        StoreKind::Half => {
+            let wdata = if half_lane == b1(0) { half } else { half << 16 };
+            let wstrb = if half_lane == b1(0) {
+                b4(0b0011)
+            } else {
+                b4(0b1100)
+            };
+            MemReq {
+                valid: true,
+                is_write: true,
+                addr: aligned_addr,
+                wdata,
+                wstrb,
+            }
+        }
+        StoreKind::Word => MemReq {
+            valid: true,
+            is_write: true,
+            addr: aligned_addr,
+            wdata: rs2,
+            wstrb: b4(0b1111),
+        },
+    }
+}
+
+#[kernel]
+pub fn is_store_misaligned(kind: StoreKind, addr: b32) -> bool {
+    let byte_lane: b2 = addr.resize();
+    match kind {
+        StoreKind::Byte => false,
+        StoreKind::Half => (byte_lane & b2(1)) != b2(0),
+        StoreKind::Word => byte_lane != b2(0),
+    }
 }
 
 #[kernel]

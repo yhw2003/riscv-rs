@@ -2,6 +2,10 @@
 
 这个目录收纳本项目的设计文档和依赖说明。
 
+## SoC
+
+- [当前 SoC 实现架构](soc-architecture.md)：梳理 `Rv32iSoc` 顶层、`Rv32iStep` 执行路径、GPIO MMIO、访存模型和验证入口。
+
 ## RHDL
 
 当前整理重点是 `rhdl`。本项目在根 `Cargo.toml` 中锁定的依赖来源是：

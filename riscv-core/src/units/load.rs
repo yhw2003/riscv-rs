@@ -1,8 +1,18 @@
 use rhdl::prelude::*;
 
-use crate::{LoadKind, MemReq, is_load_misaligned, load_value};
+use crate::MemReq;
 
 use super::ExecResult;
+
+#[derive(Copy, Clone, Debug, Default, PartialEq, Digital)]
+pub enum LoadKind {
+    #[default]
+    Byte,
+    Half,
+    Word,
+    ByteUnsigned,
+    HalfUnsigned,
+}
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Digital)]
 pub struct LoadInput {
@@ -11,6 +21,45 @@ pub struct LoadInput {
     pub rs1: b32,
     pub imm_i: b32,
     pub dmem_rdata: b32,
+}
+
+#[kernel]
+pub fn load_value(kind: LoadKind, addr: b32, rdata: b32) -> b32 {
+    let byte_lane: b2 = addr.resize();
+    let half_lane: b1 = (addr >> 1).resize();
+    let byte = if byte_lane == b2(0) {
+        rdata.resize::<8>()
+    } else if byte_lane == b2(1) {
+        (rdata >> 8).resize::<8>()
+    } else if byte_lane == b2(2) {
+        (rdata >> 16).resize::<8>()
+    } else {
+        (rdata >> 24).resize::<8>()
+    };
+    let half = if half_lane == b1(0) {
+        rdata.resize::<16>()
+    } else {
+        (rdata >> 16).resize::<16>()
+    };
+    match kind {
+        LoadKind::Byte => byte.as_signed().resize::<32>().as_unsigned(),
+        LoadKind::Half => half.as_signed().resize::<32>().as_unsigned(),
+        LoadKind::Word => rdata,
+        LoadKind::ByteUnsigned => byte.resize(),
+        LoadKind::HalfUnsigned => half.resize(),
+    }
+}
+
+#[kernel]
+pub fn is_load_misaligned(kind: LoadKind, addr: b32) -> bool {
+    let byte_lane: b2 = addr.resize();
+    match kind {
+        LoadKind::Byte => false,
+        LoadKind::Half => (byte_lane & b2(1)) != b2(0),
+        LoadKind::Word => byte_lane != b2(0),
+        LoadKind::ByteUnsigned => false,
+        LoadKind::HalfUnsigned => (byte_lane & b2(1)) != b2(0),
+    }
 }
 
 #[kernel]

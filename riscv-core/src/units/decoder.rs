@@ -1,6 +1,18 @@
 use rhdl::prelude::*;
 
-use crate::{InstFields, split_inst};
+use crate::InstFields;
+
+#[kernel]
+pub fn split_inst(inst: b32) -> InstFields {
+    InstFields {
+        opcode: inst.resize(),
+        rd: (inst >> 7).resize(),
+        funct3: (inst >> 12).resize(),
+        rs1: (inst >> 15).resize(),
+        rs2: (inst >> 20).resize(),
+        funct7: (inst >> 25).resize(),
+    }
+}
 
 #[derive(Clone, Debug, Default, Circuit)]
 pub struct DecoderCircuit;

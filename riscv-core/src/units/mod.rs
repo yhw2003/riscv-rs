@@ -11,17 +11,17 @@ pub mod reg_read;
 pub mod store;
 pub mod upper;
 
-pub use alu::AluSync;
-pub use branch::{BranchInput, BranchUnit};
-pub use decoder::Decoder;
+pub use alu::{AluIn, AluOp, AluSync};
+pub use branch::{BranchInput, BranchUnit, branch_taken};
+pub use decoder::{Decoder, split_inst};
 pub use fence::{FenceInput, FenceUnit};
-pub use immediate::{ImmediateGenerator, ImmediateValues};
+pub use immediate::{ImmediateGenerator, ImmediateValues, imm_b, imm_i, imm_j, imm_s, imm_u};
 pub use jump::{JumpInput, JumpUnit};
-pub use load::{LoadInput, LoadUnit};
+pub use load::{LoadInput, LoadKind, LoadUnit, is_load_misaligned, load_value};
 pub use op_imm::{OpImmInput, OpImmUnit};
 pub use op_reg::{OpInput, OpUnit};
 pub use reg_read::{RegRead, RegReadInput, RegReadOutput};
-pub use store::{StoreInput, StoreUnit};
+pub use store::{StoreInput, StoreKind, StoreUnit, is_store_misaligned, store_req};
 pub use upper::{UpperInput, UpperUnit};
 
 use rhdl::prelude::*;

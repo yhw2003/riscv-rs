@@ -1,8 +1,8 @@
 use rhdl::prelude::*;
 
-use crate::{AluIn, AluOp, MemReq};
+use crate::MemReq;
 
-use super::{AluSync, ExecResult};
+use super::{AluIn, AluOp, AluSync, ExecResult};
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Digital)]
 pub struct OpImmInput {
