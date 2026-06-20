@@ -2,7 +2,8 @@
 
 本文梳理 `riscv-core` 中当前 SoC 的实现方式。代码入口主要在：
 
-- `riscv-core/src/soc.rs`：SoC 顶层 `Rv32iSoc`。
+- `riscv-core/src/soc.rs`：CPU+GPIO 顶层 `Rv32iSoc`。
+- `riscv-core/src/memory.rs`：基于 BRAM 的内存子系统和完整顶层 `Rv32iBramSoc`。
 - `riscv-core/src/step.rs`：单条 RV32I 指令的执行与提交。
 - `riscv-core/src/units/`：译码、立即数、寄存器读取和各类执行单元。
 - `riscv-core/src/gpio.rs`：内存映射 GPIO 外设。
@@ -10,9 +11,9 @@
 
 ## 总体定位
 
-当前 SoC 是一个用 RHDL 描述的简易 RV32I 单核系统。它包含 CPU 状态寄存器、独立寄存器堆、单步执行逻辑和一个 GPIO 外设，但不内置指令存储器或数据存储器。
+当前 SoC 是一个用 RHDL 描述的简易 RV32I 单核系统。核心顶层 `Rv32iSoc` 包含 CPU 状态寄存器、独立寄存器堆、单步执行逻辑和一个 GPIO 外设。完整顶层 `Rv32iBramSoc` 在 `Rv32iSoc` 外再封装同步 BRAM 内存子系统，把 BRAM 输出回灌给 `inst` 和 `dmem_rdata`。
 
-外部环境需要根据 `imem_addr` 提供当前指令 `inst`，并根据 `dmem_req` 处理数据访存请求，再把读数据放到 `dmem_rdata`。因此它更像一个可综合 CPU+MMIO 外设顶层，而不是完整片上系统平台。
+裸 `Rv32iSoc` 仍保留外部存储器接口：外部环境需要根据 `imem_addr` 提供当前指令 `inst`，并根据 `dmem_req` 处理数据访存请求，再把读数据放到 `dmem_rdata`。`Rv32iBramSoc` 则把这部分 glue 内置为 64KiB BRAM。
 
 ```text
         +-------------------------------+
@@ -34,6 +35,25 @@ rdata ->|                               |--> dmem_req
         |                  |   Gpio   | |
         |                  +----------+ |
         +-------------------------------+
+```
+
+`Rv32iBramSoc` 的外层连接关系如下：
+
+```text
+        +-----------------------------------+
+        |            Rv32iBramSoc          |
+        |                                   |
+        |  +-----------+   inst/rdata       |
+        |  | BramMemory|----------------+   |
+        |  +-----------+                |   |
+        |        ^                      v   |
+        |        | imem_addr/dmem_req +-----+
+        |        +--------------------|Rv32i|
+        |                             | Soc |
+        |                             +-----+
+        |                                |  |
+        |                         gpio/trace|
+        +-----------------------------------+
 ```
 
 ## 顶层接口
@@ -217,11 +237,13 @@ GPIO_BASE = 0x1000_0000
 - half/word 的非对齐 load/store 会设置 illegal，从而进入 trap。
 - 地址输出按 4 字节对齐：`addr & 0xffff_fffc`。
 
-这意味着外部仿真或硬件 glue 需要让 `dmem_rdata` 与当前 load 请求在同一组合周期内收敛。`verilator/gpio/sim_main.cpp` 里通过多次 settle 来模拟这个行为。
+裸 `Rv32iSoc` 的外部仿真或硬件 glue 需要让 `dmem_rdata` 与当前 load 请求在同一组合周期内收敛。`verilator/gpio/sim_main.cpp` 里通过多次 settle 来模拟这个行为。
+
+`Rv32iBramSoc` 使用 `BramMemory` 消除这个外部 glue。`BramMemory` 默认容量为 64KiB，也就是 `BRAM_ADDR_BITS = 14`、`BRAM_WORDS = 16K` 个 32-bit word。它内部使用 8 个同步 `SyncBRAM<b8, BRAM_ADDR_BITS>`：4 个 lane 作为指令读端口，4 个 lane 作为数据读写端口。写路径按 `wstrb` 分 byte lane 更新，读路径把 4 个 byte lane 重新拼成 little-endian `b32`。
 
 ## Verilog 导出和验证
 
-`riscv-core/src/main.rs` 会实例化 `Rv32iSoc`，生成名为 `rv32i_soc` 的 HDL descriptor，并把 Verilog 写到 `output/o.v`：
+`riscv-core/src/main.rs` 会实例化 `Rv32iBramSoc`，生成名为 `rv32i_bram_soc` 的 HDL descriptor，并把 Verilog 写到 `output/o.v`：
 
 ```text
 cargo run -p riscv-core
@@ -232,6 +254,7 @@ cargo run -p riscv-core
 | 验证 | 位置 | 内容 |
 | --- | --- | --- |
 | Rust 单元测试 | `riscv-core/src/lib.rs` | 用 `rv32i_step` 纯函数路径与软件参考模型对拍，覆盖 ALU、立即数、访存、分支、跳转和 trap。 |
+| BRAM 顶层仿真 | `riscv-core/src/memory.rs` | 运行一个从 BRAM load 数据再写 GPIO 的小程序，覆盖 `inst` 和 `dmem_rdata` 回灌路径。 |
 | RHDL 编译检查 | `riscv-core/src/lib.rs` | 检查 `Rv32iStep` 能生成 HDL，并包含预期子模块。 |
 | Verilator 端到端测试 | `riscv-core/tests/gpio_verilator.rs` | 生成 SoC Verilog，编译 `verilator/*/*.c` 固件，仿真 GPIO MMIO 写序列。 |
 
@@ -264,8 +287,8 @@ GPIO Verilator 固件向 `0x1000_0000` 依次写入：
 
 当前实现已经覆盖 RV32I 的大部分基础整数指令路径，但仍有一些明确边界：
 
-- 不包含指令存储器、数据存储器、ROM/RAM 初始化或标准总线桥。
-- 数据访存没有 ready/valid 握手，也没有多周期 load 支持。
+- `Rv32iBramSoc` 已包含简单 BRAM 指令/数据内存，但还没有固件文件加载、ROM/RAM 分区或标准总线桥。
+- 裸 `Rv32iSoc` 的数据访存没有 ready/valid 握手，也没有通用多周期 load 支持。
 - `SYSTEM` 指令全部 trap，没有 CSR、`ECALL`、`EBREAK`、`MRET` 或中断机制。
 - `FENCE` 当前是 no-op。
 - trap 只有一个 sticky bool，没有 mcause/mtval/mepc 等异常信息。
@@ -275,8 +298,8 @@ GPIO Verilator 固件向 `0x1000_0000` 依次写入：
 
 如果继续扩展，比较自然的顺序是：
 
-1. 把外部 imem/dmem 封装成明确的 SoC memory 子系统或总线接口。
-2. 为 load/store 增加握手或多周期状态机，解除“同组合周期返回数据”的限制。
+1. 为 BRAM 顶层增加固件镜像加载和可配置内存映射。
+2. 为 load/store 增加握手或多周期状态机，支持 BRAM 之外的更通用 memory/bus 延迟。
 3. 增加可读写的 MMIO 外设寄存器规范，例如 GPIO data/direction/status。
 4. 引入 CSR 和异常信息，把 sticky trap 扩展为可调试的异常路径。
 5. 为寄存器堆增加旁路或多周期流水适配，进一步靠近真实流水 CPU 的读写时序。

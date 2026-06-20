@@ -1,11 +1,17 @@
 use rhdl::prelude::*;
 
 pub mod gpio;
+pub mod memory;
 pub mod soc;
 pub mod step;
 pub mod units;
 
 pub use gpio::{GPIO_BASE, Gpio, GpioInput, GpioOutput, apply_wstrb, gpio_decode, gpio_kernel};
+pub use memory::{
+    BRAM_ADDR_BITS, BRAM_BYTES, BRAM_WORDS, BramAddr, BramMemory, BramMemoryInput,
+    BramMemoryOutput, BramSocOutput, Rv32iBramSoc, bram_memory_kernel, bram_soc_kernel,
+    bram_word_addr, bram_write, pack_word,
+};
 pub use soc::{Rv32iSoc, SocInput, SocOutput, soc_kernel};
 pub use step::{Rv32iStep, finish_step, rv32i_step, rv32i_step_module, select_exec_result};
 pub use units::alu::alu;
