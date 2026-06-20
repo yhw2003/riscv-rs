@@ -1,0 +1,8 @@
+[workspace]
+resolver = "3"
+members = ["digital-base","riscv-core"]
+
+[workspace.dependencies]
+rhdl = { git = "https://github.com/samitbasu/rhdl.git", rev = "c99d5cc53269a247bbc675d0fbd766991d409f56" }
+rhdl-fpga = { git = "https://github.com/samitbasu/rhdl.git", rev = "c99d5cc53269a247bbc675d0fbd766991d409f56" }
+anyhow = { version = "^1" }

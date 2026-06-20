@@ -1,0 +1,8 @@
+[package]
+name = "digital-base"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rhdl = { workspace = true }
+anyhow = { workspace = true }

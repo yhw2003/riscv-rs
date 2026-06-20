@@ -1,0 +1,9 @@
+[package]
+name = "riscv-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rhdl = { workspace = true }
+rhdl-fpga = { workspace = true }
+anyhow = { workspace = true }
