@@ -11,9 +11,9 @@
 
 ## 总体定位
 
-当前 SoC 是一个用 RHDL 描述的简易 RV32I 单核系统。核心顶层 `Rv32iSoc` 包含 CPU 状态寄存器、独立寄存器堆、单步执行逻辑和一个 GPIO 外设。完整顶层 `Rv32iBramSoc` 在 `Rv32iSoc` 外再封装同步 BRAM 内存子系统，把 BRAM 输出回灌给 `inst` 和 `dmem_rdata`。
+当前 SoC 是一个用 RHDL 描述的简易 RV32I 单核系统。核心顶层 `Rv32iSoc` 包含 CPU 状态寄存器、独立寄存器堆、单步执行逻辑和一个 GPIO 外设。完整顶层 `Rv32iBramSoc` 复用这些核心子模块，并内置同步 BRAM 内存子系统，把 BRAM 输出回灌给取指和数据访存路径。
 
-裸 `Rv32iSoc` 仍保留外部存储器接口：外部环境需要根据 `imem_addr` 提供当前指令 `inst`，并根据 `dmem_req` 处理数据访存请求，再把读数据放到 `dmem_rdata`。`Rv32iBramSoc` 则把这部分 glue 内置为 64KiB BRAM。
+裸 `Rv32iSoc` 仍保留外部存储器接口：外部环境需要根据 `imem_addr` 提供当前指令 `inst`，并根据 `dmem_req` 处理数据访存请求，再把读数据放到 `dmem_rdata`。`Rv32iBramSoc` 则把这部分 glue 内置为 64KiB BRAM，并为同步 BRAM 的数据读延迟插入一个 pending-load 周期。
 
 ```text
         +-------------------------------+
@@ -47,12 +47,13 @@ rdata ->|                               |--> dmem_req
         |  | BramMemory|----------------+   |
         |  +-----------+                |   |
         |        ^                      v   |
-        |        | imem_addr/dmem_req +-----+
-        |        +--------------------|Rv32i|
-        |                             | Soc |
-        |                             +-----+
-        |                                |  |
-        |                         gpio/trace|
+        |        |              +-------------+
+        |        |              | state/step  |
+        |        +--------------| regfile/gpio|
+        | imem_addr/dmem_req   +-------------+
+        |                                |    |
+        |        pending-load wait ----->|    |
+        |                         gpio/trace |
         +-----------------------------------+
 ```
 
@@ -85,7 +86,7 @@ rdata ->|                               |--> dmem_req
 | `wdata` | 写数据，已按 byte lane 移位。 |
 | `wstrb` | 4 bit 字节写使能。 |
 
-当前接口没有 ready/valid 握手、错误响应或 load response valid。load 数据被假定能在同一组合收敛周期内通过 `dmem_rdata` 返回。
+裸 `Rv32iSoc` 接口没有 ready/valid 握手、错误响应或 load response valid。load 数据被假定能在同一组合收敛周期内通过 `dmem_rdata` 返回。
 
 ## 顶层组成
 
@@ -241,6 +242,8 @@ GPIO_BASE = 0x1000_0000
 
 `Rv32iBramSoc` 使用 `BramMemory` 消除这个外部 glue。`BramMemory` 默认容量为 64KiB，也就是 `BRAM_ADDR_BITS = 14`、`BRAM_WORDS = 16K` 个 32-bit word。它内部使用 8 个同步 `SyncBRAM<b8, BRAM_ADDR_BITS>`：4 个 lane 作为指令读端口，4 个 lane 作为数据读写端口。写路径按 `wstrb` 分 byte lane 更新，读路径把 4 个 byte lane 重新拼成 little-endian `b32`。
 
+由于 BRAM 是同步读，数据 load 不能沿用裸 `Rv32iSoc` 的组合读假设。`Rv32iBramSoc` 在看到普通内存 load 请求时会冻结架构 PC 和该条指令的写回，把 load 的 PC、指令、`rd`、地址、类型和 `next_pc` 存入 `pending_load`；下一拍 BRAM 数据有效后，再完成寄存器写回和 trace 提交。GPIO store 和普通 BRAM store 不需要这个等待周期。
+
 ## Verilog 导出和验证
 
 `riscv-core/src/main.rs` 会实例化 `Rv32iBramSoc`，生成名为 `rv32i_bram_soc` 的 HDL descriptor，并把 Verilog 写到 `output/o.v`：
@@ -256,7 +259,7 @@ cargo run -p riscv-core
 | Rust 单元测试 | `riscv-core/src/lib.rs` | 用 `rv32i_step` 纯函数路径与软件参考模型对拍，覆盖 ALU、立即数、访存、分支、跳转和 trap。 |
 | BRAM 顶层仿真 | `riscv-core/src/memory.rs` | 运行一个从 BRAM load 数据再写 GPIO 的小程序，覆盖 `inst` 和 `dmem_rdata` 回灌路径。 |
 | RHDL 编译检查 | `riscv-core/src/lib.rs` | 检查 `Rv32iStep` 能生成 HDL，并包含预期子模块。 |
-| Verilator 端到端测试 | `riscv-core/tests/gpio_verilator.rs` | 生成 SoC Verilog，编译 `verilator/*/*.c` 固件，仿真 GPIO MMIO 写序列。 |
+| Verilator 端到端测试 | `riscv-core/tests/gpio_verilator.rs` | 生成裸 SoC 和 BRAM SoC Verilog，编译 `verilator/*/*.c` 固件，仿真 GPIO MMIO 写序列。 |
 
 GPIO Verilator 固件向 `0x1000_0000` 依次写入：
 
@@ -287,7 +290,7 @@ GPIO Verilator 固件向 `0x1000_0000` 依次写入：
 
 当前实现已经覆盖 RV32I 的大部分基础整数指令路径，但仍有一些明确边界：
 
-- `Rv32iBramSoc` 已包含简单 BRAM 指令/数据内存，但还没有固件文件加载、ROM/RAM 分区或标准总线桥。
+- `Rv32iBramSoc` 已包含简单 BRAM 指令/数据内存和一拍同步 load 等待，但还没有固件文件加载、ROM/RAM 分区或标准总线桥。
 - 裸 `Rv32iSoc` 的数据访存没有 ready/valid 握手，也没有通用多周期 load 支持。
 - `SYSTEM` 指令全部 trap，没有 CSR、`ECALL`、`EBREAK`、`MRET` 或中断机制。
 - `FENCE` 当前是 no-op。

@@ -1,7 +1,14 @@
 use rhdl::prelude::*;
+use rhdl_fpga::core::dff::DFF;
 use rhdl_fpga::core::ram::synchronous::{In as BramIn, SyncBRAM, Write as BramWrite};
 
-use crate::{CommitTrace, MemReq, Rv32iSoc, SocInput, SocOutput};
+use crate::units::decoder::split_inst;
+use crate::units::immediate::imm_i;
+use crate::units::load::{LoadKind, load_value};
+use crate::{
+    CommitTrace, CoreState, Gpio, GpioInput, MemReq, RegBus, RegFileInput, RegFileUnit, RegReadReq,
+    RegWriteReq, Rv32iStep, StepInput, StepOutput,
+};
 
 pub const BRAM_ADDR_BITS: usize = 14;
 pub const BRAM_WORDS: usize = 1 << BRAM_ADDR_BITS;
@@ -35,16 +42,7 @@ pub struct BramMemory {
 
 impl Default for BramMemory {
     fn default() -> Self {
-        Self {
-            imem0: SyncBRAM::default(),
-            imem1: SyncBRAM::default(),
-            imem2: SyncBRAM::default(),
-            imem3: SyncBRAM::default(),
-            dmem0: SyncBRAM::default(),
-            dmem1: SyncBRAM::default(),
-            dmem2: SyncBRAM::default(),
-            dmem3: SyncBRAM::default(),
-        }
+        Self::new([])
     }
 }
 
@@ -65,10 +63,18 @@ impl BramMemory {
 }
 
 fn lane_bram(initial_words: &[(BramAddr, b32)], lane: u32) -> SyncBRAM<b8, BRAM_ADDR_BITS> {
+    let mut contents = vec![b8(0); BRAM_WORDS];
+    for (addr, word) in initial_words {
+        let index = addr.raw() as usize;
+        if index < BRAM_WORDS {
+            contents[index] = word_byte(*word, lane);
+        }
+    }
     SyncBRAM::new(
-        initial_words
-            .iter()
-            .map(|(addr, word)| (*addr, word_byte(*word, lane))),
+        contents
+            .into_iter()
+            .enumerate()
+            .map(|(addr, byte)| (bits(addr as u128), byte)),
     )
 }
 
@@ -182,17 +188,36 @@ pub struct BramSocOutput {
     pub trap: bool,
 }
 
+#[derive(Copy, Clone, Debug, Default, PartialEq, Digital)]
+pub struct PendingLoad {
+    pub valid: bool,
+    pub pc: b32,
+    pub inst: b32,
+    pub rd: b5,
+    pub addr: b32,
+    pub kind: LoadKind,
+    pub next_pc: b32,
+}
+
 #[derive(Clone, Debug, Synchronous, SynchronousDQ)]
 pub struct Rv32iBramSoc {
-    core: Rv32iSoc,
+    state: DFF<CoreState>,
+    reg_file: RegFileUnit,
+    step: Rv32iStep,
+    gpio: Gpio,
     memory: BramMemory,
+    pending_load: DFF<PendingLoad>,
 }
 
 impl Default for Rv32iBramSoc {
     fn default() -> Self {
         Self {
-            core: Rv32iSoc::default(),
+            state: DFF::new(CoreState::default()),
+            reg_file: RegFileUnit::default(),
+            step: Rv32iStep::default(),
+            gpio: Gpio::default(),
             memory: BramMemory::default(),
+            pending_load: DFF::new(PendingLoad::default()),
         }
     }
 }
@@ -200,8 +225,12 @@ impl Default for Rv32iBramSoc {
 impl Rv32iBramSoc {
     pub fn new(initial_words: impl IntoIterator<Item = (BramAddr, b32)>) -> Self {
         Self {
-            core: Rv32iSoc::default(),
+            state: DFF::new(CoreState::default()),
+            reg_file: RegFileUnit::default(),
+            step: Rv32iStep::default(),
+            gpio: Gpio::default(),
             memory: BramMemory::new(initial_words),
+            pending_load: DFF::new(PendingLoad::default()),
         }
     }
 }
@@ -213,30 +242,121 @@ impl SynchronousIO for Rv32iBramSoc {
 }
 
 #[kernel]
+pub fn load_kind_from_inst(inst: b32) -> LoadKind {
+    let fields = split_inst(inst);
+    if fields.funct3 == b3(0b000) {
+        LoadKind::Byte
+    } else if fields.funct3 == b3(0b001) {
+        LoadKind::Half
+    } else if fields.funct3 == b3(0b010) {
+        LoadKind::Word
+    } else if fields.funct3 == b3(0b100) {
+        LoadKind::ByteUnsigned
+    } else if fields.funct3 == b3(0b101) {
+        LoadKind::HalfUnsigned
+    } else {
+        LoadKind::Byte
+    }
+}
+
+#[kernel]
 pub fn bram_soc_kernel(
     _cr: ClockReset,
     _input: (),
     q: Rv32iBramSocQ,
 ) -> (BramSocOutput, Rv32iBramSocD) {
-    let core_out: SocOutput = q.core;
     let mem_out: BramMemoryOutput = q.memory;
+    let pending = q.pending_load;
+    let step_input = StepInput {
+        state: q.state,
+        reg_rdata: q.reg_file.rdata,
+        inst: if pending.valid {
+            b32(0x0000_0013)
+        } else {
+            mem_out.inst
+        },
+        dmem_rdata: mem_out.dmem_rdata,
+    };
+    let step_out: StepOutput = q.step;
+    let step_dmem_req = if pending.valid {
+        MemReq::default()
+    } else {
+        step_out.dmem_req
+    };
+    let gpio_out = q.gpio;
+
+    let load_request = step_dmem_req.valid && !step_dmem_req.is_write;
+    let mut state_next = step_out.state;
+    let mut reg_bus = step_out.reg_bus;
+    let mut pending_next = PendingLoad::default();
+    let mut memory_dmem_req = gpio_out.dmem_req;
+    let mut memory_imem_addr = step_out.trace.next_pc;
+    let mut trace = step_out.trace;
+
+    if pending.valid {
+        let rd_write = pending.rd != b5(0) && !q.state.trap;
+        let rd_wdata = load_value(pending.kind, pending.addr, mem_out.dmem_rdata);
+        state_next = CoreState {
+            pc: pending.next_pc,
+            trap: q.state.trap,
+        };
+        reg_bus = RegBus {
+            read: RegReadReq::default(),
+            write: RegWriteReq {
+                valid: rd_write,
+                rd: pending.rd,
+                data: rd_wdata,
+            },
+        };
+        memory_dmem_req = MemReq::default();
+        memory_imem_addr = pending.next_pc;
+        trace = CommitTrace {
+            valid: !q.state.trap,
+            pc: pending.pc,
+            inst: pending.inst,
+            rd: pending.rd,
+            rd_write,
+            rd_wdata,
+            next_pc: pending.next_pc,
+            trap: q.state.trap,
+        };
+    } else if load_request {
+        let raw_addr = q.reg_file.rdata.rs1 + imm_i(step_out.trace.inst);
+        state_next = q.state;
+        reg_bus.write.valid = false;
+        pending_next = PendingLoad {
+            valid: true,
+            pc: step_out.trace.pc,
+            inst: step_out.trace.inst,
+            rd: step_out.trace.rd,
+            addr: raw_addr,
+            kind: load_kind_from_inst(step_out.trace.inst),
+            next_pc: step_out.trace.next_pc,
+        };
+        memory_imem_addr = step_out.trace.next_pc;
+        trace.valid = false;
+    }
+
     (
         BramSocOutput {
-            imem_addr: core_out.imem_addr,
-            dmem_req: core_out.dmem_req,
-            gpio_pins: core_out.gpio_pins,
-            trace: core_out.trace,
-            trap: core_out.trap,
+            imem_addr: step_out.imem_addr,
+            dmem_req: memory_dmem_req,
+            gpio_pins: gpio_out.pins,
+            trace,
+            trap: state_next.trap,
         },
         Rv32iBramSocD {
-            core: SocInput {
-                inst: mem_out.inst,
-                dmem_rdata: mem_out.dmem_rdata,
+            state: state_next,
+            reg_file: RegFileInput { bus: reg_bus },
+            step: step_input,
+            gpio: GpioInput {
+                dmem_req: step_dmem_req,
             },
             memory: BramMemoryInput {
-                imem_addr: core_out.imem_addr,
-                dmem_req: core_out.dmem_req,
+                imem_addr: memory_imem_addr,
+                dmem_req: memory_dmem_req,
             },
+            pending_load: pending_next,
         },
     )
 }

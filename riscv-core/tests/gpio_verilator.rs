@@ -1,8 +1,11 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 
 use rhdl::prelude::*;
-use riscv_core::Rv32iSoc;
+use riscv_core::{BRAM_BYTES, BramAddr, Rv32iBramSoc, Rv32iSoc};
+
+static VERILATOR_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 fn run(command: &mut Command) {
     let output = command.output().expect("failed to spawn command");
@@ -30,15 +33,7 @@ fn command_exists(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn run_verilator_example(name: &str) {
-    let out_dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}_verilator"));
-    std::fs::create_dir_all(&out_dir).unwrap();
-
-    let verilog = out_dir.join("rv32i_soc.v");
-    let descriptor = Rv32iSoc::default().descriptor("rv32i_soc".into()).unwrap();
-    let hdl = descriptor.hdl().unwrap();
-    std::fs::write(&verilog, hdl.modules.to_string()).unwrap();
-
+fn build_firmware(name: &str, out_dir: &Path) -> PathBuf {
     let firmware_elf = out_dir.join(format!("{name}.elf"));
     let firmware_bin = out_dir.join(format!("{name}.bin"));
     let linker = manifest_path(&format!("verilator/{name}/linker.ld"));
@@ -86,6 +81,41 @@ fn run_verilator_example(name: &str) {
         .arg(&firmware_elf)
         .arg(&firmware_bin));
 
+    firmware_bin
+}
+
+fn firmware_words(path: &Path) -> Vec<(BramAddr, b32)> {
+    let firmware = std::fs::read(path).unwrap();
+    assert!(
+        firmware.len() <= BRAM_BYTES,
+        "firmware too large: {} bytes",
+        firmware.len()
+    );
+    firmware
+        .chunks(4)
+        .enumerate()
+        .map(|(index, chunk)| {
+            let mut bytes = [0_u8; 4];
+            bytes[..chunk.len()].copy_from_slice(chunk);
+            (bits(index as u128), b32(u32::from_le_bytes(bytes) as u128))
+        })
+        .collect()
+}
+
+fn run_verilator_example(name: &str) {
+    let _guard = VERILATOR_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let out_dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}_verilator"));
+    std::fs::create_dir_all(&out_dir).unwrap();
+
+    let verilog = out_dir.join("rv32i_soc.v");
+    let descriptor = Rv32iSoc::default().descriptor("rv32i_soc".into()).unwrap();
+    let hdl = descriptor.hdl().unwrap();
+    std::fs::write(&verilog, hdl.modules.to_string()).unwrap();
+
+    let firmware_bin = build_firmware(name, &out_dir);
+
     let sim_main = manifest_path(&format!("verilator/{name}/sim_main.cpp"));
     let obj_dir = out_dir.join("obj_dir");
     run(Command::new("verilator")
@@ -107,6 +137,42 @@ fn run_verilator_example(name: &str) {
     run(Command::new(obj_dir.join("Vrv32i_soc")).arg(&firmware_bin));
 }
 
+fn run_bram_verilator_example(name: &str) {
+    let _guard = VERILATOR_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let out_dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}_bram_verilator"));
+    std::fs::create_dir_all(&out_dir).unwrap();
+
+    let firmware_bin = build_firmware(name, &out_dir);
+    let verilog = out_dir.join("rv32i_bram_soc.v");
+    let descriptor = Rv32iBramSoc::new(firmware_words(&firmware_bin))
+        .descriptor("rv32i_bram_soc".into())
+        .unwrap();
+    let hdl = descriptor.hdl().unwrap();
+    std::fs::write(&verilog, hdl.modules.to_string()).unwrap();
+
+    let sim_main = manifest_path("verilator/bram_soc/sim_main.cpp");
+    let obj_dir = out_dir.join("obj_dir");
+    run(Command::new("verilator")
+        .arg("--cc")
+        .arg("--exe")
+        .arg("--build")
+        .arg("--Mdir")
+        .arg(&obj_dir)
+        .arg("--top-module")
+        .arg("rv32i_bram_soc")
+        .arg(&verilog)
+        .arg(&sim_main)
+        .arg("-CFLAGS")
+        .arg("-std=c++17")
+        .arg("-CFLAGS")
+        .arg("-O2")
+        .arg("--Wno-fatal"));
+
+    run(Command::new(obj_dir.join("Vrv32i_bram_soc")).arg(name));
+}
+
 #[test]
 fn gpio_program_passes_under_verilator() {
     run_verilator_example("gpio");
@@ -115,4 +181,14 @@ fn gpio_program_passes_under_verilator() {
 #[test]
 fn control_flow_program_passes_under_verilator() {
     run_verilator_example("control_flow");
+}
+
+#[test]
+fn gpio_program_passes_under_bram_verilator() {
+    run_bram_verilator_example("gpio");
+}
+
+#[test]
+fn control_flow_program_passes_under_bram_verilator() {
+    run_bram_verilator_example("control_flow");
 }
