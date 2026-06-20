@@ -28,13 +28,38 @@ const OPCODE_SYSTEM: b7 = b7(0b1110011);
 #[derive(Copy, Clone, Debug, Default, PartialEq, Digital)]
 pub struct CoreState {
     pub pc: b32,
-    pub regs: RegFile,
     pub trap: bool,
+}
+
+#[derive(Copy, Clone, Debug, Default, PartialEq, Digital)]
+pub struct RegReadReq {
+    pub rs1_addr: b5,
+    pub rs2_addr: b5,
+}
+
+#[derive(Copy, Clone, Debug, Default, PartialEq, Digital)]
+pub struct RegReadResp {
+    pub rs1: b32,
+    pub rs2: b32,
+}
+
+#[derive(Copy, Clone, Debug, Default, PartialEq, Digital)]
+pub struct RegWriteReq {
+    pub valid: bool,
+    pub rd: b5,
+    pub data: b32,
+}
+
+#[derive(Copy, Clone, Debug, Default, PartialEq, Digital)]
+pub struct RegBus {
+    pub read: RegReadReq,
+    pub write: RegWriteReq,
 }
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Digital)]
 pub struct StepInput {
     pub state: CoreState,
+    pub reg_rdata: RegReadResp,
     pub inst: b32,
     pub dmem_rdata: b32,
 }
@@ -73,6 +98,7 @@ pub struct CommitTrace {
 #[derive(Copy, Clone, Debug, Default, PartialEq, Digital)]
 pub struct StepOutput {
     pub state: CoreState,
+    pub reg_bus: RegBus,
     pub imem_addr: b32,
     pub dmem_req: MemReq,
     pub trace: CommitTrace,
@@ -312,15 +338,28 @@ mod tests {
     }
 
     fn to_core_state(state: &RefState) -> CoreState {
-        let mut regs = [b32(0); 32];
-        for (dst, src) in regs.iter_mut().zip(state.regs.iter()) {
-            *dst = b(*src);
-        }
         CoreState {
             pc: b(state.pc),
-            regs,
             trap: state.trap,
         }
+    }
+
+    fn reg_rdata_for(state: &RefState, inst: u32) -> RegReadResp {
+        let fields = split_inst(b(inst));
+        RegReadResp {
+            rs1: b(state.regs[fields.rs1.raw() as usize]),
+            rs2: b(state.regs[fields.rs2.raw() as usize]),
+        }
+    }
+
+    fn apply_reg_write(state: &mut RefState, write: RegWriteReq) {
+        if write.valid {
+            let rd = write.rd.raw() as usize;
+            if rd != 0 {
+                state.regs[rd] = raw(write.data);
+            }
+        }
+        state.regs[0] = 0;
     }
 
     fn apply_store(mem: &mut [u8], req: MemReq) {
@@ -348,6 +387,7 @@ mod tests {
     fn step_dut(state: &RefState, inst: u32, mem: &mut [u8]) -> StepOutput {
         let probe = rv32i_step(StepInput {
             state: to_core_state(state),
+            reg_rdata: reg_rdata_for(state, inst),
             inst: b(inst),
             dmem_rdata: b32(0),
         });
@@ -358,6 +398,7 @@ mod tests {
         };
         let out = rv32i_step(StepInput {
             state: to_core_state(state),
+            reg_rdata: reg_rdata_for(state, inst),
             inst: b(inst),
             dmem_rdata: b(rdata),
         });
@@ -580,9 +621,7 @@ mod tests {
 
             dut_state.pc = raw(out.state.pc);
             dut_state.trap = out.state.trap;
-            for idx in 0..32 {
-                dut_state.regs[idx] = raw(out.state.regs[idx]);
-            }
+            apply_reg_write(&mut dut_state, out.reg_bus.write);
 
             assert_eq!(dut_state, ref_state);
             assert_eq!(dut_mem, ref_mem);

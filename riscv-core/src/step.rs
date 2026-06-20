@@ -10,7 +10,7 @@ use crate::units::{
 use crate::{
     CommitTrace, CoreState, InstFields, OPCODE_AUIPC, OPCODE_BRANCH, OPCODE_JAL, OPCODE_JALR,
     OPCODE_LOAD, OPCODE_LUI, OPCODE_MISC_MEM, OPCODE_OP, OPCODE_OP_IMM, OPCODE_STORE,
-    OPCODE_SYSTEM, StepInput, StepOutput,
+    OPCODE_SYSTEM, RegBus, RegReadReq, RegWriteReq, StepInput, StepOutput,
 };
 
 #[derive(Clone, Debug, Default, Synchronous, SynchronousDQ)]
@@ -47,8 +47,8 @@ pub fn rv32i_step_module(_cr: ClockReset, input: StepInput, q: Q) -> (StepOutput
     d.decoder = input.inst;
     d.immediates = input.inst;
     d.reg_read = RegReadInput {
-        regs: input.state.regs,
         fields,
+        rdata: input.reg_rdata,
     };
     d.upper = UpperInput {
         opcode: fields.opcode,
@@ -158,16 +158,11 @@ pub fn select_exec_result(
 #[kernel]
 pub fn finish_step(input: StepInput, fields: InstFields, result: ExecResult) -> StepOutput {
     let pc = input.state.pc;
-    let mut regs = input.state.regs;
-    if result.rd_write && fields.rd != b5(0) && !result.illegal && !input.state.trap {
-        regs[fields.rd] = result.rd_wdata;
-    }
-    regs[0] = b32(0);
+    let rd_write = result.rd_write && fields.rd != b5(0) && !result.illegal && !input.state.trap;
 
     let trapped = input.state.trap || result.illegal;
     let state_next = CoreState {
         pc: if trapped { pc } else { result.next_pc },
-        regs,
         trap: trapped,
     };
     let trace = CommitTrace {
@@ -175,7 +170,7 @@ pub fn finish_step(input: StepInput, fields: InstFields, result: ExecResult) -> 
         pc,
         inst: input.inst,
         rd: fields.rd,
-        rd_write: result.rd_write && fields.rd != b5(0) && !result.illegal && !input.state.trap,
+        rd_write,
         rd_wdata: result.rd_wdata,
         next_pc: state_next.pc,
         trap: trapped,
@@ -183,6 +178,17 @@ pub fn finish_step(input: StepInput, fields: InstFields, result: ExecResult) -> 
 
     StepOutput {
         state: state_next,
+        reg_bus: RegBus {
+            read: RegReadReq {
+                rs1_addr: fields.rs1,
+                rs2_addr: fields.rs2,
+            },
+            write: RegWriteReq {
+                valid: rd_write,
+                rd: fields.rd,
+                data: result.rd_wdata,
+            },
+        },
         imem_addr: pc,
         dmem_req: result.dmem_req,
         trace,
@@ -193,8 +199,8 @@ pub fn rv32i_step(input: StepInput) -> StepOutput {
     let fields = split_inst(input.inst);
     let imms = units::immediate::immediates(input.inst);
     let regs = units::reg_read::read_regs(RegReadInput {
-        regs: input.state.regs,
         fields,
+        rdata: input.reg_rdata,
     });
     let pc = input.state.pc;
     let pc_plus_4 = pc + b32(4);

@@ -1,15 +1,16 @@
 use rhdl::prelude::*;
 
-use crate::{InstFields, RegFile};
+use crate::{InstFields, RegReadReq, RegReadResp};
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Digital)]
 pub struct RegReadInput {
-    pub regs: RegFile,
     pub fields: InstFields,
+    pub rdata: RegReadResp,
 }
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Digital)]
 pub struct RegReadOutput {
+    pub req: RegReadReq,
     pub rs1: b32,
     pub rs2: b32,
 }
@@ -17,8 +18,12 @@ pub struct RegReadOutput {
 #[kernel]
 pub fn read_regs(input: RegReadInput) -> RegReadOutput {
     RegReadOutput {
-        rs1: input.regs[input.fields.rs1],
-        rs2: input.regs[input.fields.rs2],
+        req: RegReadReq {
+            rs1_addr: input.fields.rs1,
+            rs2_addr: input.fields.rs2,
+        },
+        rs1: input.rdata.rs1,
+        rs2: input.rdata.rs2,
     }
 }
 
